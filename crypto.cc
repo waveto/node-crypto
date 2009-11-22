@@ -5,6 +5,7 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
+#include <openssl/hmac.h>
 #include <openssl/err.h>
 
 
@@ -13,8 +14,8 @@ using namespace v8;
 using namespace node;
 
 void hex_encode(unsigned char *md_value, int md_len, char** md_hexdigest, int* md_hex_len) {
-  *md_hex_len = (2*(md_len)) + 1;
-  *md_hexdigest = (char *) malloc(*md_hex_len);
+  *md_hex_len = (2*(md_len));
+  *md_hexdigest = (char *) malloc(*md_hex_len + 1);
   for(int i = 0; i < md_len; i++) {
     sprintf((char *)(*md_hexdigest + (i*2)), "%02x",  md_value[i]);
   }
@@ -68,6 +69,182 @@ void *unbase64(unsigned char *input, int length, char** buffer, int* buffer_len)
   BIO_free_all(bmem);
 
 }
+
+class Hmac : public EventEmitter {
+ public:
+  static void
+  Initialize (v8::Handle<v8::Object> target)
+  {
+    HandleScope scope;
+
+    Local<FunctionTemplate> t = FunctionTemplate::New(New);
+
+    t->Inherit(EventEmitter::constructor_template);
+    t->InstanceTemplate()->SetInternalFieldCount(1);
+
+    NODE_SET_PROTOTYPE_METHOD(t, "init", HmacInit);
+    NODE_SET_PROTOTYPE_METHOD(t, "update", HmacUpdate);
+    NODE_SET_PROTOTYPE_METHOD(t, "digest", HmacDigest);
+
+    target->Set(String::NewSymbol("Hmac"), t->GetFunction());
+  }
+
+  bool HmacInit(char* hashType, char* key, int key_len)
+  {
+    md = EVP_get_digestbyname(hashType);
+    if(!md) {
+      fprintf(stderr, "node-crypto : Unknown message digest %s\n", hashType);
+      return false;
+    }
+    HMAC_CTX_init(&ctx);
+    HMAC_Init(&ctx, key, key_len, md);
+    initialised = true;
+    return true;
+    
+  }
+
+  int HmacUpdate(char* data, int len) {
+    if (!initialised)
+      return 0;
+    HMAC_Update(&ctx, (unsigned char*)data, len);
+    return 1;
+  }
+
+  int HmacDigest(unsigned char** md_value, unsigned int *md_len) {
+    if (!initialised)
+      return 0;
+    *md_value = (unsigned char*) malloc(EVP_MAX_MD_SIZE);
+    HMAC_Final(&ctx, *md_value, md_len);
+    HMAC_CTX_cleanup(&ctx);
+    initialised = false;
+    return 1;
+  }
+
+
+ protected:
+
+  static Handle<Value>
+  New (const Arguments& args)
+  {
+    HandleScope scope;
+
+    Hmac *hmac = new Hmac();
+    hmac->Wrap(args.This());
+    return args.This();
+  }
+
+  static Handle<Value>
+  HmacInit(const Arguments& args) {
+    Hmac *hmac = ObjectWrap::Unwrap<Hmac>(args.This());
+
+    HandleScope scope;
+
+    if (args.Length() == 0 || !args[0]->IsString()) {
+      return ThrowException(String::New("Must give hashtype string as argument"));
+    }
+
+    ssize_t len = DecodeBytes(args[1], BINARY);
+
+    if (len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+
+    char* buf = new char[len];
+    ssize_t written = DecodeWrite(buf, len, args[1], BINARY);
+    assert(written == len);
+
+    String::Utf8Value hashType(args[0]->ToString());
+
+    bool r = hmac->HmacInit(*hashType, buf, len);
+
+    return args.This();
+  }
+
+  static Handle<Value>
+  HmacUpdate(const Arguments& args) {
+    Hmac *hmac = ObjectWrap::Unwrap<Hmac>(args.This());
+
+    HandleScope scope;
+
+    enum encoding enc = ParseEncoding(args[1]);
+    ssize_t len = DecodeBytes(args[0], enc);
+
+    if (len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+
+    char* buf = new char[len];
+    ssize_t written = DecodeWrite(buf, len, args[0], enc);
+    assert(written == len);
+
+    int r = hmac->HmacUpdate(buf, len);
+
+    return args.This();
+  }
+
+  static Handle<Value>
+  HmacDigest(const Arguments& args) {
+    Hmac *hmac = ObjectWrap::Unwrap<Hmac>(args.This());
+
+    HandleScope scope;
+
+    unsigned char* md_value;
+    unsigned int md_len;
+    char* md_hexdigest;
+    int md_hex_len;
+    Local<Value> outString ;
+
+    int r = hmac->HmacDigest(&md_value, &md_len);
+
+    if (md_len == 0 || r == 0) {
+      return scope.Close(String::New(""));
+    }
+
+    if (args.Length() == 0 || !args[0]->IsString()) {
+      // Binary
+      outString = Encode(md_value, md_len, BINARY);
+    } else {
+      String::Utf8Value encoding(args[0]->ToString());
+      if (strcasecmp(*encoding, "hex") == 0) {
+        // Hex encoding
+        hex_encode(md_value, md_len, &md_hexdigest, &md_hex_len);
+        outString = Encode(md_hexdigest, md_hex_len, BINARY);
+        free(md_hexdigest);
+      } else if (strcasecmp(*encoding, "base64") == 0) {
+        base64(md_value, md_len, &md_hexdigest, &md_hex_len);
+        outString = Encode(md_hexdigest, md_hex_len, BINARY);
+        free(md_hexdigest);
+      } else if (strcasecmp(*encoding, "binary") == 0) {
+        outString = Encode(md_value, md_len, BINARY);
+      } else {
+	fprintf(stderr, "node-crypto : Hmac .digest encoding "
+		"can be binary, hex or base64\n");
+      }
+    }
+    free(md_value);
+    return scope.Close(outString);
+
+  }
+
+  Hmac () : EventEmitter () 
+  {
+    initialised = false;
+  }
+
+  ~Hmac ()
+  {
+  }
+
+ private:
+
+  HMAC_CTX ctx;
+  const EVP_MD *md;
+  bool initialised;
+
+};
+
 
 class Hash : public EventEmitter {
  public:
@@ -638,6 +815,7 @@ init (Handle<Object> target)
   ERR_load_crypto_strings();
   OpenSSL_add_all_digests();
 
+  Hmac::Initialize(target);
   Hash::Initialize(target);
   Sign::Initialize(target);
   Verify::Initialize(target);

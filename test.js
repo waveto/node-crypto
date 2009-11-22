@@ -2,6 +2,11 @@ var crypto=require("./crypto");
 var sys=require("sys");
 var posix=require('posix');
 
+// Test HMAC
+var h1 = (new crypto.Hmac).init("sha1", "Node").update("some data").update("to hmac").digest("hex");
+sys.puts(h1);
+sys.puts(h1==='19fd6e1ba73d9ed2224dd5094a71babe85d9a892');
+
 // Test hashing
 var a0 = (new crypto.Hash).init("sha1").update("Test123").digest("hex");
 var a1 = (new crypto.Hash).init("md5").update("Test123").digest("binary");
