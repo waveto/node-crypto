@@ -2,6 +2,7 @@ var crypto=require("./crypto");
 var sys=require("sys");
 var posix=require('posix');
 
+
 // Test HMAC
 var h1 = (new crypto.Hmac).init("sha1", "Node").update("some data").update("to hmac").digest("hex");
 sys.puts(h1);
@@ -32,4 +33,33 @@ sys.puts((new crypto.Verify).init("RSA-SHA1").update("Test").update("123").verif
 var s2 = (new crypto.Sign).init("RSA-SHA256").update("Test123").sign(keyPem); // binary
 sys.puts((new crypto.Verify).init("RSA-SHA256").update("Test").update("123").verify(certPem, s2)); // binary
 
+
+// Test encryption and decryption
+var plaintext="Keep this a secret? No! Tell everyone about node.js!";
+
+var cipher=(new crypto.Cipher).init("aes192", "MySecretKey123");
+var ciph=cipher.update(plaintext, 'utf8', 'hex'); // encrypt plaintext which is in utf8 format to a ciphertext which will be in hex
+ciph+=cipher.final('hex'); // Only use binary or hex, not base64.
+sys.puts(ciph);
+
+var decipher=(new crypto.Decipher).init("aes192", "MySecretKey123");
+var txt = decipher.update(ciph, 'hex', 'utf8');
+txt += decipher.final('utf8');
+sys.puts(txt);
+
+// Test encyrption and decryption with explicit key and iv
+
+var encryption_key='0123456789abcd0123456789';
+var iv = '12345678';
+
+var cipher=(new crypto.Cipher).initiv("des-ede3-cbc", encryption_key, iv);
+
+var ciph=cipher.update(plaintext, 'utf8', 'hex'); 
+ciph+=cipher.final('hex');
+sys.puts(ciph);
+
+var decipher=(new crypto.Decipher).initiv("des-ede3-cbc",encryption_key,iv);
+var txt = decipher.update(ciph, 'hex', 'utf8');
+txt += decipher.final('utf8');
+sys.puts(txt);
 

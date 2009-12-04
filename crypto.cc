@@ -9,7 +9,6 @@
 #include <openssl/err.h>
 
 
-
 using namespace v8;
 using namespace node;
 
@@ -70,7 +69,9 @@ void *unbase64(unsigned char *input, int length, char** buffer, int* buffer_len)
 
 }
 
-class Hmac : public EventEmitter {
+
+
+class Cipher : public ObjectWrap {
  public:
   static void
   Initialize (v8::Handle<v8::Object> target)
@@ -79,7 +80,556 @@ class Hmac : public EventEmitter {
 
     Local<FunctionTemplate> t = FunctionTemplate::New(New);
 
-    t->Inherit(EventEmitter::constructor_template);
+    t->InstanceTemplate()->SetInternalFieldCount(1);
+
+    NODE_SET_PROTOTYPE_METHOD(t, "init", CipherInit);
+    NODE_SET_PROTOTYPE_METHOD(t, "initiv", CipherInitIv);
+    NODE_SET_PROTOTYPE_METHOD(t, "update", CipherUpdate);
+    NODE_SET_PROTOTYPE_METHOD(t, "final", CipherFinal);
+
+    target->Set(String::NewSymbol("Cipher"), t->GetFunction());
+  }
+
+  bool CipherInit(char* cipherType, char* key_buf, int key_buf_len)
+  {
+    cipher = EVP_get_cipherbyname(cipherType);
+    if(!cipher) {
+      fprintf(stderr, "node-crypto : Unknown cipher %s\n", cipherType);
+      return false;
+    }
+
+    unsigned char key[EVP_MAX_KEY_LENGTH],iv[EVP_MAX_IV_LENGTH];
+    int key_len = EVP_BytesToKey(cipher, EVP_md5(), NULL, (unsigned char*) key_buf, key_buf_len, 1, key, iv);
+
+    EVP_CIPHER_CTX_init(&ctx);
+    EVP_CipherInit(&ctx,cipher,(unsigned char *)key,(unsigned char *)iv, true);
+    if (!EVP_CIPHER_CTX_set_key_length(&ctx,key_len)) {
+    	fprintf(stderr, "node-crypto : Invalid key length %d\n", key_len);
+    	EVP_CIPHER_CTX_cleanup(&ctx);
+    	return false;
+    }
+    initialised = true;
+    return true;
+  }
+
+
+  bool CipherInitIv(char* cipherType, char* key, int key_len, char *iv, int iv_len)
+  {
+    cipher = EVP_get_cipherbyname(cipherType);
+    if(!cipher) {
+      fprintf(stderr, "node-crypto : Unknown cipher %s\n", cipherType);
+      return false;
+    }
+    if (EVP_CIPHER_iv_length(cipher)!=iv_len) {
+    	fprintf(stderr, "node-crypto : Invalid IV length %d\n", iv_len);
+      return false;
+    }
+    EVP_CIPHER_CTX_init(&ctx);
+    EVP_CipherInit(&ctx,cipher,(unsigned char *)key,(unsigned char *)iv, true);
+    if (!EVP_CIPHER_CTX_set_key_length(&ctx,key_len)) {
+    	fprintf(stderr, "node-crypto : Invalid key length %d\n", key_len);
+    	EVP_CIPHER_CTX_cleanup(&ctx);
+    	return false;
+    }
+    initialised = true;
+    return true;
+  }
+
+
+  int CipherUpdate(char* data, int len, unsigned char** out, int* out_len) {
+    if (!initialised)
+      return 0;
+    *out_len=len+EVP_CIPHER_CTX_block_size(&ctx);
+    *out=(unsigned char*)malloc(*out_len);
+    
+    EVP_CipherUpdate(&ctx, *out, out_len, (unsigned char*)data, len);
+    return 1;
+  }
+
+  int CipherFinal(unsigned char** out, int *out_len) {
+    if (!initialised)
+      return 0;
+    *out = (unsigned char*) malloc(EVP_CIPHER_CTX_block_size(&ctx));
+    EVP_CipherFinal(&ctx,*out,out_len);
+    EVP_CIPHER_CTX_cleanup(&ctx);
+    initialised = false;
+    return 1;
+  }
+
+
+ protected:
+
+  static Handle<Value>
+  New (const Arguments& args)
+  {
+    HandleScope scope;
+
+    Cipher *cipher = new Cipher();
+    cipher->Wrap(args.This());
+    return args.This();
+  }
+
+  static Handle<Value>
+  CipherInit(const Arguments& args) {
+    Cipher *cipher = ObjectWrap::Unwrap<Cipher>(args.This());
+		
+    HandleScope scope;
+
+    if (args.Length() <= 1 || !args[0]->IsString() || !args[1]->IsString()) {
+      return ThrowException(String::New("Must give cipher-type, key"));
+    }
+    
+
+    ssize_t key_buf_len = DecodeBytes(args[1], BINARY);
+
+    if (key_buf_len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+    
+    char* key_buf = new char[key_buf_len];
+    ssize_t key_written = DecodeWrite(key_buf, key_buf_len, args[1], BINARY);
+    assert(key_written == key_buf_len);
+    
+    String::Utf8Value cipherType(args[0]->ToString());
+
+    bool r = cipher->CipherInit(*cipherType, key_buf, key_buf_len);
+
+    return args.This();
+  }
+
+  static Handle<Value>
+  CipherInitIv(const Arguments& args) {
+    Cipher *cipher = ObjectWrap::Unwrap<Cipher>(args.This());
+		
+    HandleScope scope;
+
+    if (args.Length() <= 2 || !args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString()) {
+      return ThrowException(String::New("Must give cipher-type, key, and iv as argument"));
+    }
+    ssize_t key_len = DecodeBytes(args[1], BINARY);
+
+    if (key_len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+    
+    ssize_t iv_len = DecodeBytes(args[2], BINARY);
+
+    if (iv_len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+
+    char* key_buf = new char[key_len];
+    ssize_t key_written = DecodeWrite(key_buf, key_len, args[1], BINARY);
+    assert(key_written == key_len);
+    
+    char* iv_buf = new char[iv_len];
+    ssize_t iv_written = DecodeWrite(iv_buf, iv_len, args[2], BINARY);
+    assert(iv_written == iv_len);
+
+    String::Utf8Value cipherType(args[0]->ToString());
+    	
+    bool r = cipher->CipherInitIv(*cipherType, key_buf,key_len,iv_buf,iv_len);
+
+    return args.This();
+  }
+
+  static Handle<Value>
+  CipherUpdate(const Arguments& args) {
+    Cipher *cipher = ObjectWrap::Unwrap<Cipher>(args.This());
+
+    HandleScope scope;
+
+    enum encoding enc = ParseEncoding(args[1]);
+    ssize_t len = DecodeBytes(args[0], enc);
+
+    if (len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+
+    char* buf = new char[len];
+    ssize_t written = DecodeWrite(buf, len, args[0], enc);
+    assert(written == len);
+    unsigned char *out=0;
+    int out_len=0;
+    int r = cipher->CipherUpdate(buf, len,&out,&out_len);
+    
+    Local<Value> outString;
+    if (out_len==0) outString=String::New("");
+    else {
+    	if (args.Length() <= 2 || !args[2]->IsString()) {
+	      // Binary
+	      outString = Encode(out, out_len, BINARY);
+	    } else {
+	    	char* out_hexdigest;
+        int out_hex_len;
+	      String::Utf8Value encoding(args[2]->ToString());
+	      if (strcasecmp(*encoding, "hex") == 0) {
+	        // Hex encoding
+	        hex_encode(out, out_len, &out_hexdigest, &out_hex_len);
+	        outString = Encode(out_hexdigest, out_hex_len, BINARY);
+	        free(out_hexdigest);
+	      } else if (strcasecmp(*encoding, "base64") == 0) {
+	        base64(out, out_len, &out_hexdigest, &out_hex_len);
+	        outString = Encode(out_hexdigest, out_hex_len, BINARY);
+	        free(out_hexdigest);
+	      } else if (strcasecmp(*encoding, "binary") == 0) {
+	        outString = Encode(out, out_len, BINARY);
+	      } else {
+		fprintf(stderr, "node-crypto : Cipher .update encoding "
+			"can be binary, hex or base64\n");
+	      }
+	    }
+    }
+    if (out) free(out);
+    return scope.Close(outString);
+  }
+
+  static Handle<Value>
+  CipherFinal(const Arguments& args) {
+    Cipher *cipher = ObjectWrap::Unwrap<Cipher>(args.This());
+
+    HandleScope scope;
+
+    unsigned char* out_value;
+    int out_len;
+    char* out_hexdigest;
+    int out_hex_len;
+    Local<Value> outString ;
+
+    int r = cipher->CipherFinal(&out_value, &out_len);
+
+    if (out_len == 0 || r == 0) {
+      return scope.Close(String::New(""));
+    }
+
+    if (args.Length() == 0 || !args[0]->IsString()) {
+      // Binary
+      outString = Encode(out_value, out_len, BINARY);
+    } else {
+      String::Utf8Value encoding(args[0]->ToString());
+      if (strcasecmp(*encoding, "hex") == 0) {
+        // Hex encoding
+        hex_encode(out_value, out_len, &out_hexdigest, &out_hex_len);
+        outString = Encode(out_hexdigest, out_hex_len, BINARY);
+        free(out_hexdigest);
+      } else if (strcasecmp(*encoding, "base64") == 0) {
+        base64(out_value, out_len, &out_hexdigest, &out_hex_len);
+        outString = Encode(out_hexdigest, out_hex_len, BINARY);
+        free(out_hexdigest);
+      } else if (strcasecmp(*encoding, "binary") == 0) {
+        outString = Encode(out_value, out_len, BINARY);
+      } else {
+	fprintf(stderr, "node-crypto : Cipher .final encoding "
+		"can be binary, hex or base64\n");
+      }
+    }
+    free(out_value);
+    return scope.Close(outString);
+
+  }
+
+  Cipher () : ObjectWrap () 
+  {
+    initialised = false;
+  }
+
+  ~Cipher ()
+  {
+  }
+
+ private:
+
+  EVP_CIPHER_CTX ctx;
+  const EVP_CIPHER *cipher;
+  bool initialised;
+
+};
+
+
+
+class Decipher : public ObjectWrap {
+ public:
+  static void
+  Initialize (v8::Handle<v8::Object> target)
+  {
+    HandleScope scope;
+
+    Local<FunctionTemplate> t = FunctionTemplate::New(New);
+
+    t->InstanceTemplate()->SetInternalFieldCount(1);
+
+    NODE_SET_PROTOTYPE_METHOD(t, "init", DecipherInit);
+    NODE_SET_PROTOTYPE_METHOD(t, "initiv", DecipherInitIv);
+    NODE_SET_PROTOTYPE_METHOD(t, "update", DecipherUpdate);
+    NODE_SET_PROTOTYPE_METHOD(t, "final", DecipherFinal);
+
+    target->Set(String::NewSymbol("Decipher"), t->GetFunction());
+  }
+
+  bool DecipherInit(char* cipherType, char* key_buf, int key_buf_len)
+  {
+    cipher = EVP_get_cipherbyname(cipherType);
+    if(!cipher) {
+      fprintf(stderr, "node-crypto : Unknown cipher %s\n", cipherType);
+      return false;
+    }
+
+    unsigned char key[EVP_MAX_KEY_LENGTH],iv[EVP_MAX_IV_LENGTH];
+    int key_len = EVP_BytesToKey(cipher, EVP_md5(), NULL, (unsigned char*) key_buf, key_buf_len, 1, key, iv);
+
+    EVP_CIPHER_CTX_init(&ctx);
+    EVP_CipherInit(&ctx,cipher,(unsigned char *)key,(unsigned char *)iv, false);
+    if (!EVP_CIPHER_CTX_set_key_length(&ctx,key_len)) {
+    	fprintf(stderr, "node-crypto : Invalid key length %d\n", key_len);
+    	EVP_CIPHER_CTX_cleanup(&ctx);
+    	return false;
+    }
+    initialised = true;
+    return true;
+  }
+
+
+  bool DecipherInitIv(char* cipherType, char* key, int key_len, char *iv, int iv_len)
+  {
+    cipher = EVP_get_cipherbyname(cipherType);
+    if(!cipher) {
+      fprintf(stderr, "node-crypto : Unknown cipher %s\n", cipherType);
+      return false;
+    }
+    if (EVP_CIPHER_iv_length(cipher)!=iv_len) {
+    	fprintf(stderr, "node-crypto : Invalid IV length %d\n", iv_len);
+      return false;
+    }
+    EVP_CIPHER_CTX_init(&ctx);
+    EVP_CipherInit(&ctx,cipher,(unsigned char *)key,(unsigned char *)iv, false);
+    if (!EVP_CIPHER_CTX_set_key_length(&ctx,key_len)) {
+    	fprintf(stderr, "node-crypto : Invalid key length %d\n", key_len);
+    	EVP_CIPHER_CTX_cleanup(&ctx);
+    	return false;
+    }
+    initialised = true;
+    return true;
+  }
+
+  int DecipherUpdate(char* data, int len, unsigned char** out, int* out_len) {
+    if (!initialised)
+      return 0;
+    *out_len=len+EVP_CIPHER_CTX_block_size(&ctx);
+    *out=(unsigned char*)malloc(*out_len);
+    
+    EVP_CipherUpdate(&ctx, *out, out_len, (unsigned char*)data, len);
+    return 1;
+  }
+
+  int DecipherFinal(unsigned char** out, int *out_len) {
+    if (!initialised)
+      return 0;
+    *out = (unsigned char*) malloc(EVP_CIPHER_CTX_block_size(&ctx));
+    EVP_CipherFinal(&ctx,*out,out_len);
+    EVP_CIPHER_CTX_cleanup(&ctx);
+    initialised = false;
+    return 1;
+  }
+
+
+ protected:
+
+  static Handle<Value>
+  New (const Arguments& args)
+  {
+    HandleScope scope;
+
+    Decipher *cipher = new Decipher();
+    cipher->Wrap(args.This());
+    return args.This();
+  }
+
+  static Handle<Value>
+  DecipherInit(const Arguments& args) {
+    Decipher *cipher = ObjectWrap::Unwrap<Decipher>(args.This());
+		
+    HandleScope scope;
+
+    if (args.Length() <= 1 || !args[0]->IsString() || !args[1]->IsString()) {
+      return ThrowException(String::New("Must give cipher-type, key as argument"));
+    }
+
+    ssize_t key_len = DecodeBytes(args[1], BINARY);
+
+    if (key_len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+    
+    char* key_buf = new char[key_len];
+    ssize_t key_written = DecodeWrite(key_buf, key_len, args[1], BINARY);
+    assert(key_written == key_len);
+    
+    String::Utf8Value cipherType(args[0]->ToString());
+    	
+    bool r = cipher->DecipherInit(*cipherType, key_buf,key_len);
+
+    return args.This();
+  }
+
+  static Handle<Value>
+  DecipherInitIv(const Arguments& args) {
+    Decipher *cipher = ObjectWrap::Unwrap<Decipher>(args.This());
+		
+    HandleScope scope;
+
+    if (args.Length() <= 2 || !args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString()) {
+      return ThrowException(String::New("Must give cipher-type, key, and iv as argument"));
+    }
+
+    ssize_t key_len = DecodeBytes(args[1], BINARY);
+
+    if (key_len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+    
+    ssize_t iv_len = DecodeBytes(args[2], BINARY);
+
+    if (iv_len < 0) {
+      Local<Value> exception = Exception::TypeError(String::New("Bad argument"));
+      return ThrowException(exception);
+    }
+
+    char* key_buf = new char[key_len];
+    ssize_t key_written = DecodeWrite(key_buf, key_len, args[1], BINARY);
+    assert(key_written == key_len);
+    
+    char* iv_buf = new char[iv_len];
+    ssize_t iv_written = DecodeWrite(iv_buf, iv_len, args[2], BINARY);
+    assert(iv_written == iv_len);
+
+    String::Utf8Value cipherType(args[0]->ToString());
+    	
+    bool r = cipher->DecipherInitIv(*cipherType, key_buf,key_len,iv_buf,iv_len);
+
+    return args.This();
+  }
+
+  static Handle<Value>
+  DecipherUpdate(const Arguments& args) {
+    Decipher *cipher = ObjectWrap::Unwrap<Decipher>(args.This());
+
+    HandleScope scope;
+
+    ssize_t len = DecodeBytes(args[0], BINARY);
+    char* buf = new char[len];
+    ssize_t written = DecodeWrite(buf, len, args[0], BINARY);
+    char* ciphertext;
+    int ciphertext_len;
+
+
+    if (args.Length() <= 1 || !args[1]->IsString()) {
+      // Binary - do nothing
+    } else {
+      String::Utf8Value encoding(args[1]->ToString());
+      if (strcasecmp(*encoding, "hex") == 0) {
+	// Hex encoding
+        hex_decode((unsigned char*)buf, len, (char **)&ciphertext, &ciphertext_len);
+        free(buf);
+	buf = ciphertext;
+	len = ciphertext_len;
+      } else if (strcasecmp(*encoding, "base64") == 0) {
+        unbase64((unsigned char*)buf, len, (char **)&ciphertext, &ciphertext_len);
+        free(buf);
+	buf = ciphertext;
+	len = ciphertext_len;
+      } else if (strcasecmp(*encoding, "binary") == 0) {
+        // Binary - do nothing
+      } else {
+	fprintf(stderr, "node-crypto : Decipher .update encoding "
+		"can be binary, hex or base64\n");
+      }
+  
+    }
+
+    unsigned char *out=0;
+    int out_len=0;
+    int r = cipher->DecipherUpdate(buf, len,&out,&out_len);
+
+    Local<Value> outString;
+
+    if (args.Length() <= 2 || !args[2]->IsString()) {
+      outString = Encode(out, out_len, BINARY);
+    } else {
+      enum encoding enc = ParseEncoding(args[1]);
+      outString = Encode(out, out_len, enc);
+    }
+
+    if (out) free(out);
+    free(buf);
+    return scope.Close(outString);
+
+  }
+
+  static Handle<Value>
+  DecipherFinal(const Arguments& args) {
+    Decipher *cipher = ObjectWrap::Unwrap<Decipher>(args.This());
+
+    HandleScope scope;
+
+    unsigned char* out_value;
+    int out_len;
+    char* out_hexdigest;
+    int out_hex_len;
+    Local<Value> outString ;
+
+    int r = cipher->DecipherFinal(&out_value, &out_len);
+
+    if (out_len == 0 || r == 0) {
+      return scope.Close(String::New(""));
+    }
+
+
+    if (args.Length() == 0 || !args[0]->IsString()) {
+      outString = Encode(out_value, out_len, BINARY);
+    } else {
+      enum encoding enc = ParseEncoding(args[0]);
+      outString = Encode(out_value, out_len, enc);
+    }
+    free(out_value);
+    return scope.Close(outString);
+
+  }
+
+  Decipher () : ObjectWrap () 
+  {
+    initialised = false;
+  }
+
+  ~Decipher ()
+  {
+  }
+
+ private:
+
+  EVP_CIPHER_CTX ctx;
+  const EVP_CIPHER *cipher;
+  bool initialised;
+
+};
+
+
+
+
+class Hmac : public ObjectWrap {
+ public:
+  static void
+  Initialize (v8::Handle<v8::Object> target)
+  {
+    HandleScope scope;
+
+    Local<FunctionTemplate> t = FunctionTemplate::New(New);
+
     t->InstanceTemplate()->SetInternalFieldCount(1);
 
     NODE_SET_PROTOTYPE_METHOD(t, "init", HmacInit);
@@ -228,7 +778,7 @@ class Hmac : public EventEmitter {
 
   }
 
-  Hmac () : EventEmitter () 
+  Hmac () : ObjectWrap () 
   {
     initialised = false;
   }
@@ -246,7 +796,7 @@ class Hmac : public EventEmitter {
 };
 
 
-class Hash : public EventEmitter {
+class Hash : public ObjectWrap {
  public:
   static void
   Initialize (v8::Handle<v8::Object> target)
@@ -255,7 +805,6 @@ class Hash : public EventEmitter {
 
     Local<FunctionTemplate> t = FunctionTemplate::New(New);
 
-    t->Inherit(EventEmitter::constructor_template);
     t->InstanceTemplate()->SetInternalFieldCount(1);
 
     NODE_SET_PROTOTYPE_METHOD(t, "init", HashInit);
@@ -393,7 +942,7 @@ class Hash : public EventEmitter {
 
   }
 
-  Hash () : EventEmitter () 
+  Hash () : ObjectWrap () 
   {
     initialised = false;
   }
@@ -410,7 +959,7 @@ class Hash : public EventEmitter {
 
 };
 
-class Sign : public EventEmitter {
+class Sign : public ObjectWrap {
  public:
   static void
   Initialize (v8::Handle<v8::Object> target)
@@ -419,7 +968,6 @@ class Sign : public EventEmitter {
 
     Local<FunctionTemplate> t = FunctionTemplate::New(New);
 
-    t->Inherit(EventEmitter::constructor_template);
     t->InstanceTemplate()->SetInternalFieldCount(1);
 
     NODE_SET_PROTOTYPE_METHOD(t, "init", SignInit);
@@ -585,7 +1133,7 @@ class Sign : public EventEmitter {
 
   }
 
-  Sign () : EventEmitter () 
+  Sign () : ObjectWrap () 
   {
     initialised = false;
   }
@@ -602,7 +1150,7 @@ class Sign : public EventEmitter {
 
 };
 
-class Verify : public EventEmitter {
+class Verify : public ObjectWrap {
  public:
   static void
   Initialize (v8::Handle<v8::Object> target)
@@ -611,7 +1159,6 @@ class Verify : public EventEmitter {
 
     Local<FunctionTemplate> t = FunctionTemplate::New(New);
 
-    t->Inherit(EventEmitter::constructor_template);
     t->InstanceTemplate()->SetInternalFieldCount(1);
 
     NODE_SET_PROTOTYPE_METHOD(t, "init", VerifyInit);
@@ -788,7 +1335,7 @@ class Verify : public EventEmitter {
     return scope.Close(Integer::New(r));
   }
 
-  Verify () : EventEmitter () 
+  Verify () : ObjectWrap () 
   {
     initialised = false;
   }
@@ -814,7 +1361,10 @@ init (Handle<Object> target)
 
   ERR_load_crypto_strings();
   OpenSSL_add_all_digests();
+  OpenSSL_add_all_algorithms();
 
+  Cipher::Initialize(target);
+  Decipher::Initialize(target);
   Hmac::Initialize(target);
   Hash::Initialize(target);
   Sign::Initialize(target);

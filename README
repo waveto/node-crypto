@@ -4,6 +4,8 @@ node-crypto
 A wrapper around openssl for node.js, currently exposing Hashing, Signing
 and Verifying methods.
 
+Version 0.0.3 : Added cipher / decipher, thanks to Frans-Willem Hardijzer.
+
 To install, ensure that you have openssl installed, and run:
 
 node-waf configure 
@@ -13,6 +15,8 @@ This will put the crypto.node binary module in build/default.
 
 The hashing, signing and verifying methods can work with binary, hex or 
 base64 encoded strings.
+
+The encrypt / decrypt methods work with binary or hex encodings.
 
 Quick example
 -------------
@@ -33,3 +37,11 @@ var certPem = posix.cat("test_cert.pem").wait();
 // Test signing and verifying
 var s1 = (new crypto.Sign).init("RSA-SHA256").update("Test123").sign(keyPem, "base64");
 sys.puts((new crypto.Verify).init("RSA-SHA256").update("Test").update("123").verify(certPem, s1, "base64"));
+
+// Test encryption and decryption
+var plaintext="Keep this a secret? No! Tell everyone about node.js!";
+
+var cipher=(new crypto.Cipher).init("aes192", "MySecretKey123");
+var ciph=cipher.update(plaintext, 'utf8', 'hex'); 
+ciph+=cipher.final('hex');
+sys.puts(ciph);
