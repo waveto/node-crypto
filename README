@@ -16,7 +16,8 @@ This will put the crypto.node binary module in build/default.
 The hashing, signing and verifying methods can work with binary, hex or 
 base64 encoded strings.
 
-The encrypt / decrypt methods work with binary or hex encodings.
+The encrypt / decrypt methods work with binary, hex or base64 encodings,
+with streaming.
 
 Quick example
 -------------

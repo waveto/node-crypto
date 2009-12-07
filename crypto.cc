@@ -8,7 +8,6 @@
 #include <openssl/hmac.h>
 #include <openssl/err.h>
 
-
 using namespace v8;
 using namespace node;
 
@@ -69,6 +68,58 @@ void *unbase64(unsigned char *input, int length, char** buffer, int* buffer_len)
 
 }
 
+
+// LengthWithoutIncompleteUtf8 from V8 d8-posix.cc
+// see http://v8.googlecode.com/svn/trunk/src/d8-posix.cc
+static int LengthWithoutIncompleteUtf8(char* buffer, int len) {
+  int answer = len;
+  // 1-byte encoding.
+  static const int kUtf8SingleByteMask = 0x80;
+  static const int kUtf8SingleByteValue = 0x00;
+  // 2-byte encoding.
+  static const int kUtf8TwoByteMask = 0xe0;
+  static const int kUtf8TwoByteValue = 0xc0;
+  // 3-byte encoding.
+  static const int kUtf8ThreeByteMask = 0xf0;
+  static const int kUtf8ThreeByteValue = 0xe0;
+  // 4-byte encoding.
+  static const int kUtf8FourByteMask = 0xf8;
+  static const int kUtf8FourByteValue = 0xf0;
+  // Subsequent bytes of a multi-byte encoding.
+  static const int kMultiByteMask = 0xc0;
+  static const int kMultiByteValue = 0x80;
+  int multi_byte_bytes_seen = 0;
+  while (answer > 0) {
+    int c = buffer[answer - 1];
+    // Ends in valid single-byte sequence?
+    if ((c & kUtf8SingleByteMask) == kUtf8SingleByteValue) return answer;
+    // Ends in one or more subsequent bytes of a multi-byte value?
+    if ((c & kMultiByteMask) == kMultiByteValue) {
+      multi_byte_bytes_seen++;
+      answer--;
+    } else {
+      if ((c & kUtf8TwoByteMask) == kUtf8TwoByteValue) {
+        if (multi_byte_bytes_seen >= 1) {
+          return answer + 2;
+        }
+        return answer - 1;
+      } else if ((c & kUtf8ThreeByteMask) == kUtf8ThreeByteValue) {
+        if (multi_byte_bytes_seen >= 2) {
+          return answer + 3;
+        }
+        return answer - 1;
+      } else if ((c & kUtf8FourByteMask) == kUtf8FourByteValue) {
+        if (multi_byte_bytes_seen >= 3) {
+          return answer + 4;
+        }
+        return answer - 1;
+      } else {
+        return answer;  // Malformed UTF-8.
+      }
+    }
+  }
+  return 0;
+}
 
 
 class Cipher : public ObjectWrap {
@@ -175,6 +226,8 @@ class Cipher : public ObjectWrap {
 		
     HandleScope scope;
 
+    cipher->incomplete_base64=NULL;
+
     if (args.Length() <= 1 || !args[0]->IsString() || !args[1]->IsString()) {
       return ThrowException(String::New("Must give cipher-type, key"));
     }
@@ -203,6 +256,8 @@ class Cipher : public ObjectWrap {
     Cipher *cipher = ObjectWrap::Unwrap<Cipher>(args.This());
 		
     HandleScope scope;
+
+    cipher->incomplete_base64=NULL;
 
     if (args.Length() <= 2 || !args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString()) {
       return ThrowException(String::New("Must give cipher-type, key, and iv as argument"));
@@ -236,6 +291,7 @@ class Cipher : public ObjectWrap {
     return args.This();
   }
 
+
   static Handle<Value>
   CipherUpdate(const Arguments& args) {
     Cipher *cipher = ObjectWrap::Unwrap<Cipher>(args.This());
@@ -253,6 +309,7 @@ class Cipher : public ObjectWrap {
     char* buf = new char[len];
     ssize_t written = DecodeWrite(buf, len, args[0], enc);
     assert(written == len);
+
     unsigned char *out=0;
     int out_len=0;
     int r = cipher->CipherUpdate(buf, len,&out,&out_len);
@@ -264,8 +321,8 @@ class Cipher : public ObjectWrap {
 	      // Binary
 	      outString = Encode(out, out_len, BINARY);
 	    } else {
-	    	char* out_hexdigest;
-        int out_hex_len;
+	      char* out_hexdigest;
+	      int out_hex_len;
 	      String::Utf8Value encoding(args[2]->ToString());
 	      if (strcasecmp(*encoding, "hex") == 0) {
 	        // Hex encoding
@@ -273,6 +330,28 @@ class Cipher : public ObjectWrap {
 	        outString = Encode(out_hexdigest, out_hex_len, BINARY);
 	        free(out_hexdigest);
 	      } else if (strcasecmp(*encoding, "base64") == 0) {
+		// Base64 encoding
+		// Check to see if we need to add in previous base64 overhang
+		if (cipher->incomplete_base64!=NULL){
+		  unsigned char* complete_base64 = (unsigned char *)malloc(out_len+cipher->incomplete_base64_len+1);
+		  memcpy(complete_base64, cipher->incomplete_base64, cipher->incomplete_base64_len);
+		  memcpy(&complete_base64[cipher->incomplete_base64_len], out, out_len);
+		  free(out);
+		  free(cipher->incomplete_base64);
+		  cipher->incomplete_base64=NULL;
+		  out=complete_base64;
+		  out_len += cipher->incomplete_base64_len;
+		}
+
+		// Check to see if we need to trim base64 stream
+		if (out_len%3!=0){
+		  cipher->incomplete_base64_len = out_len%3;
+		  cipher->incomplete_base64 = (char *)malloc(cipher->incomplete_base64_len+1);
+		  memcpy(cipher->incomplete_base64, &out[out_len-cipher->incomplete_base64_len], cipher->incomplete_base64_len);
+		  out_len -= cipher->incomplete_base64_len;
+		  out[out_len]=0;
+		}
+
 	        base64(out, out_len, &out_hexdigest, &out_hex_len);
 	        outString = Encode(out_hexdigest, out_hex_len, BINARY);
 	        free(out_hexdigest);
@@ -346,6 +425,8 @@ class Cipher : public ObjectWrap {
   EVP_CIPHER_CTX ctx;
   const EVP_CIPHER *cipher;
   bool initialised;
+  char* incomplete_base64;
+  int incomplete_base64_len;
 
 };
 
@@ -454,6 +535,9 @@ class Decipher : public ObjectWrap {
 		
     HandleScope scope;
 
+    cipher->incomplete_utf8=NULL;
+    cipher->incomplete_hex_flag=false;
+
     if (args.Length() <= 1 || !args[0]->IsString() || !args[1]->IsString()) {
       return ThrowException(String::New("Must give cipher-type, key as argument"));
     }
@@ -481,6 +565,9 @@ class Decipher : public ObjectWrap {
     Decipher *cipher = ObjectWrap::Unwrap<Decipher>(args.This());
 		
     HandleScope scope;
+
+    cipher->incomplete_utf8=NULL;
+    cipher->incomplete_hex_flag=false;
 
     if (args.Length() <= 2 || !args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString()) {
       return ThrowException(String::New("Must give cipher-type, key, and iv as argument"));
@@ -534,7 +621,24 @@ class Decipher : public ObjectWrap {
       String::Utf8Value encoding(args[1]->ToString());
       if (strcasecmp(*encoding, "hex") == 0) {
 	// Hex encoding
+	// Do we have a previous hex carry over?
+	if (cipher->incomplete_hex_flag) {
+	  char* complete_hex = (char*)malloc(len+2);
+	  memcpy(complete_hex, &cipher->incomplete_hex, 1);
+	  memcpy(complete_hex+1, buf, len);
+	  free(buf);
+	  buf = complete_hex;
+	  len += 1;
+	}
+	// Do we have an incomplete hex stream?
+	if ((len>0) && (len % 2 !=0)) {
+	  len--;
+	  cipher->incomplete_hex=buf[len];
+	  cipher->incomplete_hex_flag=true;
+	  buf[len]=0;
+	}
         hex_decode((unsigned char*)buf, len, (char **)&ciphertext, &ciphertext_len);
+
         free(buf);
 	buf = ciphertext;
 	len = ciphertext_len;
@@ -557,12 +661,35 @@ class Decipher : public ObjectWrap {
     int r = cipher->DecipherUpdate(buf, len,&out,&out_len);
 
     Local<Value> outString;
-
-    if (args.Length() <= 2 || !args[2]->IsString()) {
+    if (out_len==0) {
+      outString=String::New("");
+    } else if (args.Length() <= 2 || !args[2]->IsString()) {
       outString = Encode(out, out_len, BINARY);
     } else {
-      enum encoding enc = ParseEncoding(args[1]);
-      outString = Encode(out, out_len, enc);
+      enum encoding enc = ParseEncoding(args[2]);
+      if (enc == UTF8) {
+	// See if we have any overhang from last utf8 partial ending
+	if (cipher->incomplete_utf8!=NULL) {
+	  char* complete_out = (char *)malloc(cipher->incomplete_utf8_len + out_len);
+	  memcpy(complete_out, cipher->incomplete_utf8, cipher->incomplete_utf8_len);
+	  memcpy((char *)complete_out+cipher->incomplete_utf8_len, out, out_len);
+	  free(out);
+	  free(cipher->incomplete_utf8);
+	  cipher->incomplete_utf8=NULL;
+	  out = (unsigned char*)complete_out;
+	  out_len += cipher->incomplete_utf8_len;
+	}
+	// Check to see if we have a complete utf8 stream
+	int utf8_len = LengthWithoutIncompleteUtf8((char *)out, out_len);
+	if (utf8_len<out_len) { // We have an incomplete ut8 ending
+	  cipher->incomplete_utf8_len = out_len-utf8_len;
+          cipher->incomplete_utf8 = (unsigned char *)malloc(cipher->incomplete_utf8_len+1);
+          memcpy(cipher->incomplete_utf8, &out[utf8_len], cipher->incomplete_utf8_len);
+	} 
+        outString = Encode(out, utf8_len, enc);
+      } else {
+        outString = Encode(out, out_len, enc);
+      }
     }
 
     if (out) free(out);
@@ -594,7 +721,22 @@ class Decipher : public ObjectWrap {
       outString = Encode(out_value, out_len, BINARY);
     } else {
       enum encoding enc = ParseEncoding(args[0]);
-      outString = Encode(out_value, out_len, enc);
+      if (enc == UTF8) {
+	// See if we have any overhang from last utf8 partial ending
+	if (cipher->incomplete_utf8!=NULL) {
+	  char* complete_out = (char *)malloc(cipher->incomplete_utf8_len + out_len);
+	  memcpy(complete_out, cipher->incomplete_utf8, cipher->incomplete_utf8_len);
+	  memcpy((char *)complete_out+cipher->incomplete_utf8_len, out_value, out_len);
+	  free(cipher->incomplete_utf8);
+	  cipher->incomplete_utf8=NULL;
+	  outString = Encode(complete_out, cipher->incomplete_utf8_len+out_len, enc);
+	  free(complete_out);
+	} else {
+	  outString = Encode(out_value, out_len, enc);
+	}
+      } else {
+	outString = Encode(out_value, out_len, enc);
+      }
     }
     free(out_value);
     return scope.Close(outString);
@@ -615,7 +757,10 @@ class Decipher : public ObjectWrap {
   EVP_CIPHER_CTX ctx;
   const EVP_CIPHER *cipher;
   bool initialised;
-
+  unsigned char* incomplete_utf8;
+  int incomplete_utf8_len;
+  char incomplete_hex;
+  bool incomplete_hex_flag;
 };
 
 
