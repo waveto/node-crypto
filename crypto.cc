@@ -8,6 +8,8 @@
 #include <openssl/hmac.h>
 #include <openssl/err.h>
 
+#define EVP_F_EVP_DECRYPTFINAL 101
+
 using namespace v8;
 using namespace node;
 
@@ -120,6 +122,59 @@ static int LengthWithoutIncompleteUtf8(char* buffer, int len) {
   }
   return 0;
 }
+
+// local decrypt final without strict padding check
+// to work with php mcrypt
+// see http://www.mail-archive.com/openssl-dev@openssl.org/msg19927.html
+int local_EVP_DecryptFinal_ex(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl)
+{
+  int i,b;
+  int n;
+
+  *outl=0;
+  b=ctx->cipher->block_size;
+  if (ctx->flags & EVP_CIPH_NO_PADDING)
+    {
+      if(ctx->buf_len)
+	{
+	  EVPerr(EVP_F_EVP_DECRYPTFINAL,EVP_R_DATA_NOT_MULTIPLE_OF_BLOCK_LENGTH);
+	  return 0;
+	}
+      *outl = 0;
+      return 1;
+    }
+  if (b > 1)
+    {
+      if (ctx->buf_len || !ctx->final_used)
+	{
+	  EVPerr(EVP_F_EVP_DECRYPTFINAL,EVP_R_WRONG_FINAL_BLOCK_LENGTH);
+	  return(0);
+	}
+      OPENSSL_assert(b <= sizeof ctx->final);
+      n=ctx->final[b-1];
+      if (n > b)
+	{
+	  EVPerr(EVP_F_EVP_DECRYPTFINAL,EVP_R_BAD_DECRYPT);
+	  return(0);
+	}
+      for (i=0; i<n; i++)
+	{
+	  if (ctx->final[--b] != n)
+	    {
+	      EVPerr(EVP_F_EVP_DECRYPTFINAL,EVP_R_BAD_DECRYPT);
+	      return(0);
+	    }
+	}
+      n=ctx->cipher->block_size-n;
+      for (i=0; i<n; i++)
+	out[i]=ctx->final[i];
+      *outl=n;
+    }
+  else
+    *outl=0;
+  return(1);
+}
+
 
 
 class Cipher : public ObjectWrap {
@@ -447,6 +502,7 @@ class Decipher : public ObjectWrap {
     NODE_SET_PROTOTYPE_METHOD(t, "initiv", DecipherInitIv);
     NODE_SET_PROTOTYPE_METHOD(t, "update", DecipherUpdate);
     NODE_SET_PROTOTYPE_METHOD(t, "final", DecipherFinal);
+    NODE_SET_PROTOTYPE_METHOD(t, "finaltol", DecipherFinalTolerate);
 
     target->Set(String::NewSymbol("Decipher"), t->GetFunction());
   }
@@ -506,11 +562,15 @@ class Decipher : public ObjectWrap {
     return 1;
   }
 
-  int DecipherFinal(unsigned char** out, int *out_len) {
+  int DecipherFinal(unsigned char** out, int *out_len, bool tolerate_padding) {
     if (!initialised)
       return 0;
     *out = (unsigned char*) malloc(EVP_CIPHER_CTX_block_size(&ctx));
-    EVP_CipherFinal(&ctx,*out,out_len);
+    if (tolerate_padding) {
+      local_EVP_DecryptFinal_ex(&ctx,*out,out_len);
+    } else {
+      EVP_CipherFinal(&ctx,*out,out_len);
+    }
     EVP_CIPHER_CTX_cleanup(&ctx);
     initialised = false;
     return 1;
@@ -710,7 +770,52 @@ class Decipher : public ObjectWrap {
     int out_hex_len;
     Local<Value> outString ;
 
-    int r = cipher->DecipherFinal(&out_value, &out_len);
+    int r = cipher->DecipherFinal(&out_value, &out_len, false);
+
+    if (out_len == 0 || r == 0) {
+      return scope.Close(String::New(""));
+    }
+
+
+    if (args.Length() == 0 || !args[0]->IsString()) {
+      outString = Encode(out_value, out_len, BINARY);
+    } else {
+      enum encoding enc = ParseEncoding(args[0]);
+      if (enc == UTF8) {
+	// See if we have any overhang from last utf8 partial ending
+	if (cipher->incomplete_utf8!=NULL) {
+	  char* complete_out = (char *)malloc(cipher->incomplete_utf8_len + out_len);
+	  memcpy(complete_out, cipher->incomplete_utf8, cipher->incomplete_utf8_len);
+	  memcpy((char *)complete_out+cipher->incomplete_utf8_len, out_value, out_len);
+	  free(cipher->incomplete_utf8);
+	  cipher->incomplete_utf8=NULL;
+	  outString = Encode(complete_out, cipher->incomplete_utf8_len+out_len, enc);
+	  free(complete_out);
+	} else {
+	  outString = Encode(out_value, out_len, enc);
+	}
+      } else {
+	outString = Encode(out_value, out_len, enc);
+      }
+    }
+    free(out_value);
+    return scope.Close(outString);
+
+  }
+
+  static Handle<Value>
+  DecipherFinalTolerate(const Arguments& args) {
+    Decipher *cipher = ObjectWrap::Unwrap<Decipher>(args.This());
+
+    HandleScope scope;
+
+    unsigned char* out_value;
+    int out_len;
+    char* out_hexdigest;
+    int out_hex_len;
+    Local<Value> outString ;
+
+    int r = cipher->DecipherFinal(&out_value, &out_len, true);
 
     if (out_len == 0 || r == 0) {
       return scope.Close(String::New(""));
