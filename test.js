@@ -1,6 +1,6 @@
 var crypto=require("./crypto");
 var sys=require("sys");
-var posix=require('posix');
+var fs=require('fs');
 
 
 // Test HMAC
@@ -23,8 +23,8 @@ sys.puts(h1===h2);
 
 
 // Load our public and private keys
-var keyPem = posix.cat("test_key.pem").wait();
-var certPem = posix.cat("test_cert.pem").wait();
+var keyPem = fs.readFileSync("test_key.pem");
+var certPem = fs.readFileSync("test_cert.pem");
 
 // Test signing and verifying
 var s1 = (new crypto.Sign).init("RSA-SHA1").update("Test123").sign(keyPem, "base64");
