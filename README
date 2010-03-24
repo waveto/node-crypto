@@ -4,6 +4,8 @@ node-crypto
 A wrapper around openssl for node.js, currently exposing Hashing, Signing
 and Verifying methods.
 
+Version 0.0.5 : test.js now uses mjsunit
+
 Version 0.0.4 : Added package.json and updated tests to latest node version.
 
 Version 0.0.3 : Added cipher / decipher, thanks to Frans-Willem Hardijzer.
