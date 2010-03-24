@@ -1,0 +1,11 @@
+{ "name" : "crypto"
+, "author" : "Rhys <rhys@wave.to>"
+, "version" : "1.0.0"
+, "scripts" :
+  { "preinstall" : "node-waf configure"
+  , "install" : "node-waf build"
+  , "test" : "node test.js"
+  }
+, "main" : "build/default/crypto"
+, "engines" : [ "node" ]
+}
