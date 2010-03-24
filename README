@@ -19,30 +19,4 @@ base64 encoded strings.
 The encrypt / decrypt methods work with binary, hex or base64 encodings,
 with streaming.
 
-Quick example
--------------
-
-var sys=require("sys");
-var posix=require('posix');
-var crypto=require("./crypto");
-
-// Test hashing
-var h1 = (new crypto.Hash).init("sha1").update("Test123").digest("hex");
-var h2 = (new crypto.Hash).init("sha1").update("Test").update("123").digest("hex");
-sys.puts(h1===h2);
-
-// Load our public and private keys
-var keyPem = posix.cat("test_key.pem").wait();
-var certPem = posix.cat("test_cert.pem").wait();
-
-// Test signing and verifying
-var s1 = (new crypto.Sign).init("RSA-SHA256").update("Test123").sign(keyPem, "base64");
-sys.puts((new crypto.Verify).init("RSA-SHA256").update("Test").update("123").verify(certPem, s1, "base64"));
-
-// Test encryption and decryption
-var plaintext="Keep this a secret? No! Tell everyone about node.js!";
-
-var cipher=(new crypto.Cipher).init("aes192", "MySecretKey123");
-var ciph=cipher.update(plaintext, 'utf8', 'hex'); 
-ciph+=cipher.final('hex');
-sys.puts(ciph);
+See test.js for example usage.
